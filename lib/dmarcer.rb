@@ -1,5 +1,6 @@
 require 'dmarcer/version'
 require 'nokogiri'
+require 'resolv'
 
 module Dmarcer
   class Parser
@@ -26,7 +27,7 @@ module Dmarcer
     end
 
     def id
-      data.report_metadata.report_id
+      data.report_metadata.report_id.content
     end
 
     def records
@@ -41,25 +42,55 @@ module Dmarcer
       records.select { |r| r.auth_failed_spf_domains.any? }
     end
 
+    def spf_domain_ip_hash
+      spf_auth_failure_records.each_with_object({}) do |r, m|
+        r.auth_failed_spf_domains.each do |d|
+          if m[d]
+            m[d] << r.source_ip
+          else
+            m[d] = [r.source_ip]
+          end
+        end
+      end
+    end
+
     def print_report
       puts "Report Organization: #{org_name}"
       puts "Report ID: #{id}"
       puts "Date Range: #{date_range}"
       puts ''
-      puts 'SPF Failures'
-      spf_auth_failure_records.each do |r|
-        puts "Auth failed SPF domains: #{r.auth_failed_spf_domains}"
+      puts '------------------ SPF Failures ------------------'
+      # spf_auth_failure_records.each do |r|
+      #   puts "Source IP: #{r.source_ip} (#{lookup(r.source_ip)})"
+      #   puts "Auth failed SPF domains: #{r.auth_failed_spf_domains.join(', ')}"
+      #   puts ''
+      # end
+      spf_domain_ip_hash.each do |domain, ips|
+        puts domain
+        ips.each { |ip| puts "  #{lookup(ip)} [#{ip}]" }
+        puts ''
       end
-      puts 'DKIM Failures'
+      puts '------------------ DKIM Failures ------------------'
       dkim_auth_failure_records.each do |r|
-        puts "Auth failed DKIM domains: #{r.auth_failed_dkim_domains}"
+        puts "Source IP: #{r.source_ip} (#{lookup(r.source_ip)})"
+        unless r.auth_failed_dkim_domains == ['evertrue.com']
+          puts "Auth failed DKIM domains: #{r.auth_failed_dkim_domains.join(', ')}"
+          puts ''
+        end
       end
     end
 
     private
 
-    def data(file)
-      @data ||= Nokogiri::Slop(File.read(file)).feedback
+    def lookup(ip)
+      return Resolv.getname(ip) if ip !~ Resolv::IPv6::Regex
+      'err IPv6 address'
+    rescue Resolv::ResolvError
+      nil
+    end
+
+    def data
+      @data ||= Nokogiri::Slop(File.read(@input_file)).feedback
     end
   end
 
@@ -133,7 +164,7 @@ module Dmarcer
         return [@data.auth_results.send(type).domain.content]
       end
       @data.auth_results.send(type)
-        .select { |r| r.send(type).result.content != 'pass' }
+        .select { |r| r.respond_to?(type) && r.send(type).result.content != 'pass' }
         .map { |r| r.domain.content }.uniq.sort
       # rubocop:enable Metrics/LineLength
     end
